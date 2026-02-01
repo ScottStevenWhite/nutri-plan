@@ -2,17 +2,19 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Alert, Badge, Button, Card, Group, ScrollArea, Select, Stack, Text, TextInput, Title } from '@mantine/core'
 import { useAppState } from '../state/AppStateContext'
 import type { DayPlan, WeekPlan } from '../state/types'
-import { uid } from '../state/utils'
+import { todayISO, uid } from '../state/utils'
 
-const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
+const SLOT_NAMES = ['Slot 1', 'Slot 2', 'Slot 3', 'Slot 4', 'Slot 5', 'Slot 6', 'Slot 7'] as const
 
 export default function PlanPage() {
   const { state, dispatch } = useAppState()
-  const [planName, setPlanName] = useState(state.plan.name)
+  const [bundleName, setBundleName] = useState(state.plan.name)
+  const [pendingSnacksBySlot, setPendingSnacksBySlot] = useState<Record<number, number>>({})
 
   // keep local input in sync when plan changes from hydration/reset
   useEffect(() => {
-    setPlanName(state.plan.name)
+    setBundleName(state.plan.name)
+    setPendingSnacksBySlot({})
   }, [state.plan.id])
 
   const recipeOptions = useMemo(
@@ -28,35 +30,55 @@ export default function PlanPage() {
     dispatch({ type: 'SET_PLAN', plan: updated })
   }
 
-  function setDay(dayIndex: number, patch: Partial<DayPlan>) {
-    const days = state.plan.days.map((d, i) => (i === dayIndex ? { ...d, ...patch } : d))
-    savePlan({ ...state.plan, name: planName, days })
+  function setSlot(slotIndex: number, patch: Partial<DayPlan>) {
+    const days = state.plan.days.map((d, i) => (i === slotIndex ? { ...d, ...patch } : d))
+    savePlan({ ...state.plan, name: bundleName, days })
   }
 
-  function addSnack(dayIndex: number) {
-    const day = state.plan.days[dayIndex]
-    setDay(dayIndex, { snackRecipeIds: [...day.snackRecipeIds, ''] as any })
+  function addSnackSlot(slotIndex: number) {
+    setPendingSnacksBySlot(prev => ({
+      ...prev,
+      [slotIndex]: (prev[slotIndex] ?? 0) + 1,
+    }))
   }
 
-  function updateSnack(dayIndex: number, snackIndex: number, recipeId: string) {
-    const day = state.plan.days[dayIndex]
+  function removePendingSnackSlot(slotIndex: number) {
+    setPendingSnacksBySlot(prev => {
+      const cur = prev[slotIndex] ?? 0
+      const nextCount = Math.max(0, cur - 1)
+      const next = { ...prev, [slotIndex]: nextCount }
+      if (nextCount === 0) delete next[slotIndex]
+      return next
+    })
+  }
+
+  function commitNewSnack(slotIndex: number, recipeId: string) {
+    const id = recipeId.trim()
+    if (!id) return
+    const day = state.plan.days[slotIndex]
+    setSlot(slotIndex, { snackRecipeIds: [...day.snackRecipeIds, id] })
+    removePendingSnackSlot(slotIndex)
+  }
+
+  function updateSnack(slotIndex: number, snackIndex: number, recipeId: string) {
+    const day = state.plan.days[slotIndex]
     const next = day.snackRecipeIds.slice()
     next[snackIndex] = recipeId
-    setDay(dayIndex, { snackRecipeIds: next.filter(Boolean) })
+    setSlot(slotIndex, { snackRecipeIds: next.filter(Boolean) })
   }
 
-  function removeSnack(dayIndex: number, snackIndex: number) {
-    const day = state.plan.days[dayIndex]
+  function removeSnack(slotIndex: number, snackIndex: number) {
+    const day = state.plan.days[slotIndex]
     const next = day.snackRecipeIds.filter((_, i) => i !== snackIndex)
-    setDay(dayIndex, { snackRecipeIds: next })
+    setSlot(slotIndex, { snackRecipeIds: next })
   }
 
-  function newEmptyWeek() {
+  function newEmptyBundle() {
     const blankDay: DayPlan = { snackRecipeIds: [] }
     const next: WeekPlan = {
       id: uid(),
-      name: planName || 'This Week',
-      startDateISO: new Date().toISOString().slice(0, 10),
+      name: bundleName || 'Slot Bundle',
+      startDateISO: todayISO(),
       days: Array.from({ length: 7 }, () => ({ ...blankDay })),
     }
     savePlan(next)
@@ -66,36 +88,36 @@ export default function PlanPage() {
     <Stack gap="md">
       <Group justify="space-between" align="flex-end" wrap="wrap">
         <div>
-          <Title order={2}>Week Plan</Title>
+          <Title order={2}>Edit Slots</Title>
           <Text c="dimmed" size="sm">
-            Build the week first. Then validate nutrition on Dashboard.
+            Surgical overrides after generation. These are slots, not a calendar week.
           </Text>
         </div>
-        <Badge variant="light">{state.plan.days.length} days</Badge>
+        <Badge variant="light">{state.plan.days.length} slots</Badge>
       </Group>
 
-      <Card withBorder radius="lg" p="md">
+      <Card p="md">
         <Group justify="space-between" align="flex-end" wrap="wrap">
           <TextInput
-            label="Plan name"
-            value={planName}
-            onChange={e => setPlanName(e.currentTarget.value)}
-            placeholder="This Week"
+            label="Bundle name"
+            value={bundleName}
+            onChange={e => setBundleName(e.currentTarget.value)}
+            placeholder="Slot Bundle"
             style={{ flex: 1, minWidth: 260 }}
           />
 
           <Group>
-            <Button variant="default" onClick={() => savePlan({ ...state.plan, name: planName })}>
+            <Button variant="default" onClick={() => savePlan({ ...state.plan, name: bundleName })}>
               Save name
             </Button>
-            <Button variant="default" onClick={newEmptyWeek}>
-              New empty week
+            <Button variant="default" onClick={newEmptyBundle}>
+              New empty bundle
             </Button>
           </Group>
         </Group>
 
         <Text c="dimmed" size="sm" mt="sm">
-          UX decision: the UI enforces exactly one breakfast/lunch/dinner per day. Snacks are a list.
+          UX decision: still enforces max one breakfast/lunch/dinner per slot. Snacks are a list.
         </Text>
       </Card>
 
@@ -105,18 +127,18 @@ export default function PlanPage() {
         </Alert>
       )}
 
-      <Card withBorder radius="lg" p="md">
-        <Text fw={650}>Days</Text>
+      <Card p="md">
+        <Text fw={650}>Slots</Text>
         <Text c="dimmed" size="sm" mt={4}>
           Tip: scroll horizontally on smaller screens.
         </Text>
 
         <ScrollArea mt="md" type="auto" offsetScrollbars>
           <Group wrap="nowrap" align="flex-start" gap="md">
-            {state.plan.days.map((day, dayIndex) => (
-              <Card key={dayIndex} withBorder radius="lg" w={260} p="md">
+            {state.plan.days.map((day, slotIndex) => (
+              <Card key={slotIndex} w={280} p="md">
                 <Group justify="space-between" wrap="nowrap">
-                  <Text fw={650}>{DAY_NAMES[dayIndex]}</Text>
+                  <Text fw={650}>{SLOT_NAMES[slotIndex]}</Text>
                   <Badge variant="light">{day.snackRecipeIds.length} snacks</Badge>
                 </Group>
 
@@ -125,7 +147,7 @@ export default function PlanPage() {
                   label="Breakfast"
                   data={recipeOptions}
                   value={day.breakfastRecipeId ?? null}
-                  onChange={v => setDay(dayIndex, { breakfastRecipeId: v || undefined })}
+                  onChange={v => setSlot(slotIndex, { breakfastRecipeId: v || undefined })}
                   searchable
                   clearable
                   nothingFoundMessage="No recipes"
@@ -136,7 +158,7 @@ export default function PlanPage() {
                   label="Lunch"
                   data={recipeOptions}
                   value={day.lunchRecipeId ?? null}
-                  onChange={v => setDay(dayIndex, { lunchRecipeId: v || undefined })}
+                  onChange={v => setSlot(slotIndex, { lunchRecipeId: v || undefined })}
                   searchable
                   clearable
                   nothingFoundMessage="No recipes"
@@ -147,7 +169,7 @@ export default function PlanPage() {
                   label="Dinner"
                   data={recipeOptions}
                   value={day.dinnerRecipeId ?? null}
-                  onChange={v => setDay(dayIndex, { dinnerRecipeId: v || undefined })}
+                  onChange={v => setSlot(slotIndex, { dinnerRecipeId: v || undefined })}
                   searchable
                   clearable
                   nothingFoundMessage="No recipes"
@@ -157,12 +179,12 @@ export default function PlanPage() {
                   <Text size="sm" fw={600}>
                     Snacks
                   </Text>
-                  <Button size="xs" variant="default" onClick={() => addSnack(dayIndex)}>
+                  <Button size="xs" variant="default" onClick={() => addSnackSlot(slotIndex)}>
                     + snack
                   </Button>
                 </Group>
 
-                {day.snackRecipeIds.length === 0 ? (
+                {day.snackRecipeIds.length === 0 && !(pendingSnacksBySlot[slotIndex] ?? 0) ? (
                   <Text c="dimmed" size="sm" mt="xs">
                     No snacks
                   </Text>
@@ -174,7 +196,7 @@ export default function PlanPage() {
                           style={{ flex: 1 }}
                           data={recipeOptions}
                           value={snackId || null}
-                          onChange={v => updateSnack(dayIndex, snackIndex, v || '')}
+                          onChange={v => updateSnack(slotIndex, snackIndex, v || '')}
                           searchable
                           clearable
                           nothingFoundMessage="No recipes"
@@ -183,7 +205,30 @@ export default function PlanPage() {
                           size="xs"
                           variant="default"
                           color="red"
-                          onClick={() => removeSnack(dayIndex, snackIndex)}
+                          onClick={() => removeSnack(slotIndex, snackIndex)}
+                        >
+                          Remove
+                        </Button>
+                      </Group>
+                    ))}
+
+                    {Array.from({ length: pendingSnacksBySlot[slotIndex] ?? 0 }).map((_, i) => (
+                      <Group key={`pending-${i}`} wrap="nowrap" align="flex-end">
+                        <Select
+                          style={{ flex: 1 }}
+                          data={recipeOptions}
+                          value={null}
+                          onChange={v => commitNewSnack(slotIndex, v || '')}
+                          searchable
+                          clearable
+                          nothingFoundMessage="No recipes"
+                          placeholder="Pick a snack…"
+                        />
+                        <Button
+                          size="xs"
+                          variant="default"
+                          color="red"
+                          onClick={() => removePendingSnackSlot(slotIndex)}
                         >
                           Remove
                         </Button>
@@ -195,19 +240,6 @@ export default function PlanPage() {
             ))}
           </Group>
         </ScrollArea>
-      </Card>
-
-      <Card withBorder radius="lg" p="md">
-        <Title order={4}>Sanity checklist</Title>
-        <Stack gap={6} mt="sm">
-          <Text>• Did you set a person + targets?</Text>
-          <Text>• Are your recipes using mostly Foundation / SR Legacy foods?</Text>
-          <Text>• Are your ingredient grams realistic (cooked vs dry matters)?</Text>
-        </Stack>
-        <Text c="dimmed" size="sm" mt="sm">
-          Cronometer-level accuracy later needs unit support and cooked-yield adjustments. For “design a plan and validate
-          coverage,” this is enough.
-        </Text>
       </Card>
     </Stack>
   )

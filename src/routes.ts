@@ -1,36 +1,39 @@
 export type AppPage =
-  | 'planBundle'
+  | 'planner'
   | 'weekPlan'
-  | 'analysis'
+  | 'review'
   | 'grocery'
   | 'prep'
-  | 'supplements'
   | 'recipes'
   | 'foods'
   | 'people'
+  | 'supplements'
+  | 'kitchen'
   | 'household'
   | 'settings'
 
 export function pageLabel(page: AppPage): string {
   switch (page) {
-    case 'planBundle':
-      return 'Plan Bundle'
+    case 'planner':
+      return 'Slot Bundle'
     case 'weekPlan':
-      return 'Week Plan'
-    case 'analysis':
-      return 'Analysis'
+      return 'Edit Slots'
+    case 'review':
+      return 'Review'
     case 'grocery':
-      return 'Grocery List'
+      return 'Grocery'
     case 'prep':
-      return 'Prep Plan'
-    case 'supplements':
-      return 'Supplements'
+      return 'Prep'
     case 'recipes':
       return 'Recipes'
     case 'foods':
       return 'Foods (FDC)'
     case 'people':
-      return 'People & Targets'
+      return 'Targets'
+    case 'supplements':
+      return 'Supplements & Meds'
+    case 'kitchen':
+      return 'Kitchen'
     case 'household':
       return 'Household'
     case 'settings':

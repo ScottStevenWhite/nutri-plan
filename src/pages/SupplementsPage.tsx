@@ -1,280 +1,196 @@
 import React, { useMemo, useState } from 'react'
-import {
-  Badge,
-  Button,
-  Card,
-  Checkbox,
-  Divider,
-  Group,
-  Select,
-  Stack,
-  Table,
-  Text,
-  TextInput,
-  Title,
-} from '@mantine/core'
+import { Badge, Button, Card, Group, NumberInput, Select, Stack, Table, Text, TextInput, Textarea, Title } from '@mantine/core'
+import { notifications } from '@mantine/notifications'
 
 import { useAppState } from '../state/AppStateContext'
-import { todayISO, uid } from '../state/utils'
-import { useLocalStorageState } from '../local/useLocalStorageState'
+import type { Supplement } from '../state/types'
+import { uid } from '../state/utils'
+import { backendDeleteSupplement, backendUpsertSupplement } from '../backend/api'
 
-type SupplementSchedule = 'daily' | 'monWedFri' | 'asNeeded'
-
-type SupplementPlanItem = {
-  id: string
-  personId: string | 'household'
-  name: string
-  dose?: string
-  schedule: SupplementSchedule
-  enabled: boolean
-}
-
-type SupplementChecks = Record<string, string[]> // dateISO -> completed item IDs
-
-function weekdayIndex(dateISO: string): number {
-  const d = new Date(`${dateISO}T12:00:00`)
-  const js = d.getDay() // 0=Sun..6=Sat
-  return js === 0 ? 7 : js // Mon=1..Sun=7
-}
-
-function isDue(item: SupplementPlanItem, dateISO: string): boolean {
-  if (!item.enabled) return false
-  if (item.schedule === 'daily') return true
-  if (item.schedule === 'monWedFri') {
-    const idx = weekdayIndex(dateISO)
-    return idx === 1 || idx === 3 || idx === 5
-  }
-  return false
-}
-
-function scheduleLabel(s: SupplementSchedule): string {
-  if (s === 'daily') return 'Daily'
-  if (s === 'monWedFri') return 'Mon/Wed/Fri'
-  return 'As needed'
-}
+const CATEGORY_OPTIONS = [
+  { value: 'supplement', label: 'supplement' },
+  { value: 'vitamin', label: 'vitamin' },
+  { value: 'medication', label: 'medication' },
+  { value: 'other', label: 'other' },
+]
 
 export default function SupplementsPage() {
-  const { state } = useAppState()
-  const today = todayISO()
+  const { state, dispatch, refresh } = useAppState()
 
-  const [planItems, setPlanItems] = useLocalStorageState<SupplementPlanItem[]>('nutri-plan::supplementPlanItems', [])
-  const [checks, setChecks] = useLocalStorageState<SupplementChecks>('nutri-plan::supplementChecks', {})
+  const personOptions = state.people.map(p => ({ value: p.id, label: p.name }))
+  const person = state.people.find(p => p.id === state.selectedPersonId)
 
-  const personOptions = useMemo(
-    () => [
-      { value: 'household', label: 'Household' },
-      ...state.people.map(p => ({ value: p.id, label: p.name })),
-    ],
-    [state.people],
-  )
-
-  const [personId, setPersonId] = useState<string>('household')
+  const [suppId, setSuppId] = useState<string>('')
   const [name, setName] = useState('')
-  const [dose, setDose] = useState('')
-  const [schedule, setSchedule] = useState<SupplementSchedule>('daily')
+  const [category, setCategory] = useState('supplement')
+  const [dose, setDose] = useState<number | ''>('')
+  const [unit, setUnit] = useState('')
+  const [schedule, setSchedule] = useState('')
+  const [notes, setNotes] = useState('')
 
-  const dueToday = useMemo(() => {
-    return planItems.filter(i => isDue(i, today))
-  }, [planItems, today])
-
-  const doneSet = useMemo(() => new Set(checks[today] ?? []), [checks, today])
-
-  function toggleDone(itemId: string, checked: boolean) {
-    setChecks(prev => {
-      const existing = new Set(prev[today] ?? [])
-      if (checked) existing.add(itemId)
-      else existing.delete(itemId)
-      return { ...prev, [today]: Array.from(existing) }
-    })
-  }
-
-  function addItem() {
+  async function save() {
+    if (!person) return
     const trimmed = name.trim()
     if (!trimmed) return
-    const item: SupplementPlanItem = {
-      id: uid(),
-      personId: (personId || 'household') as any,
+
+    const s: Supplement = {
+      id: suppId || uid(),
       name: trimmed,
-      dose: dose.trim() || undefined,
-      schedule,
-      enabled: true,
+      category,
+      dose: typeof dose === 'number' && Number.isFinite(dose) ? dose : undefined,
+      unit: unit.trim() || undefined,
+      schedule: schedule.trim() || undefined,
+      notes: notes.trim() || undefined,
     }
-    setPlanItems(prev => [...prev, item])
-    setName('')
-    setDose('')
-    setSchedule('daily')
+
+    try {
+      await backendUpsertSupplement(person.id, s)
+      await refresh()
+      setSuppId('')
+      setName('')
+      setCategory('supplement')
+      setDose('')
+      setUnit('')
+      setSchedule('')
+      setNotes('')
+      notifications.show({ title: 'Saved', message: 'Supplement upserted.', color: 'green' })
+    } catch (e: any) {
+      notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+    }
   }
 
-  const doneCount = dueToday.filter(i => doneSet.has(i.id)).length
+  async function remove(supplementId: string) {
+    if (!person) return
+    try {
+      await backendDeleteSupplement(person.id, supplementId)
+      await refresh()
+      notifications.show({ title: 'Deleted', message: 'Supplement removed.', color: 'green' })
+    } catch (e: any) {
+      notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+    }
+  }
+
+  const supplements = useMemo(() => (person?.supplements ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [person])
 
   return (
     <Stack gap="md">
       <Group justify="space-between" align="flex-end" wrap="wrap">
         <div>
-          <Title order={2}>Supplements</Title>
+          <Title order={2}>Supplements & Meds</Title>
           <Text c="dimmed" size="sm">
-            This is not food logging. It’s a compliance checklist (v0 local-only).
+            Stored on the backend per person. (Compliance checklist comes later.)
           </Text>
         </div>
-        <Badge variant="light">
-          Today: {doneCount}/{dueToday.length} done
-        </Badge>
+        <Badge variant="light">{supplements.length} items</Badge>
       </Group>
 
       <Card withBorder radius="lg" p="md">
-        <Text fw={700}>Today</Text>
-        <Text c="dimmed" size="sm" mt={4}>
-          Date: {today}
-        </Text>
-
-        <Divider my="md" />
-
-        {dueToday.length === 0 ? (
-          <Text c="dimmed">No scheduled items today.</Text>
-        ) : (
-          <Stack gap="sm">
-            {dueToday.map(i => (
-              <Card key={i.id} withBorder radius="lg" p="md">
-                <Group justify="space-between" wrap="nowrap" align="flex-start">
-                  <div style={{ minWidth: 0 }}>
-                    <Text fw={700} lineClamp={1}>
-                      {i.name}
-                    </Text>
-                    <Text c="dimmed" size="sm">
-                      {scheduleLabel(i.schedule)}
-                      {i.dose ? ` · ${i.dose}` : ''}
-                    </Text>
-                  </div>
-
-                  <Checkbox
-                    checked={doneSet.has(i.id)}
-                    onChange={e => toggleDone(i.id, e.currentTarget.checked)}
-                    aria-label="Done"
-                  />
-                </Group>
-              </Card>
-            ))}
-          </Stack>
-        )}
-
-        <Divider my="md" />
-
-        <Button variant="default" color="red" onClick={() => setChecks(prev => ({ ...prev, [today]: [] }))}>
-          Reset today
-        </Button>
+        <Select
+          label="Person"
+          data={personOptions}
+          value={state.selectedPersonId ?? null}
+          placeholder="Select…"
+          onChange={v => dispatch({ type: 'SELECT_PERSON', personId: v || undefined })}
+          searchable
+          style={{ minWidth: 240 }}
+        />
       </Card>
 
-      <Card withBorder radius="lg" p="md">
-        <Text fw={700}>Add item</Text>
+      {!person ? (
+        <Text c="dimmed">Pick a person.</Text>
+      ) : (
+        <>
+          <Card withBorder radius="lg" p="md">
+            <Group justify="space-between" wrap="wrap">
+              <Text fw={800}>Add / update</Text>
+              <Badge variant="light">writes to backend</Badge>
+            </Group>
 
-        <Group mt="sm" align="flex-end" wrap="wrap">
-          <Select
-            label="Person"
-            data={personOptions}
-            value={personId}
-            onChange={v => setPersonId(v ?? 'household')}
-            style={{ minWidth: 220 }}
-          />
+            <Group mt="sm" align="flex-end" wrap="wrap">
+              <TextInput
+                label="Name"
+                value={name}
+                onChange={e => setName(e.currentTarget.value)}
+                placeholder="Creatine"
+                style={{ flex: 1, minWidth: 220 }}
+              />
 
-          <TextInput
-            label="Name"
-            value={name}
-            onChange={e => setName(e.currentTarget.value)}
-            placeholder="Creatine"
-            style={{ flex: 1, minWidth: 220 }}
-          />
+              <Select
+                label="Category"
+                value={category}
+                onChange={v => setCategory(v ?? 'supplement')}
+                data={CATEGORY_OPTIONS}
+                style={{ width: 180 }}
+              />
 
-          <TextInput
-            label="Dose (optional)"
-            value={dose}
-            onChange={e => setDose(e.currentTarget.value)}
-            placeholder="5g"
-            style={{ width: 160 }}
-          />
+              <NumberInput label="Dose" value={dose} onChange={setDose} min={0} step={1} style={{ width: 140 }} />
+              <TextInput label="Unit" value={unit} onChange={e => setUnit(e.currentTarget.value)} placeholder="g" style={{ width: 120 }} />
+              <TextInput
+                label="Schedule"
+                value={schedule}
+                onChange={e => setSchedule(e.currentTarget.value)}
+                placeholder="daily / mon-wed-fri"
+                style={{ width: 220 }}
+              />
 
-          <Select
-            label="Schedule"
-            data={[
-              { value: 'daily', label: 'Daily' },
-              { value: 'monWedFri', label: 'Mon/Wed/Fri' },
-              { value: 'asNeeded', label: 'As needed' },
-            ]}
-            value={schedule}
-            onChange={v => setSchedule((v as SupplementSchedule) ?? 'daily')}
-            style={{ width: 180 }}
-          />
+              <Button onClick={save} disabled={!name.trim()}>
+                Save
+              </Button>
+            </Group>
 
-          <Button onClick={addItem}>Add</Button>
-        </Group>
+            <Textarea mt="sm" label="Notes" value={notes} onChange={e => setNotes(e.currentTarget.value)} />
+          </Card>
 
-        <Text c="dimmed" size="sm" mt="sm">
-          Later: supplement products + nutrients per dose + backend contribution to totals.
-        </Text>
-      </Card>
+          <Card withBorder radius="lg" p="md">
+            <Group justify="space-between" wrap="wrap">
+              <Text fw={800}>Current list</Text>
+              <Badge variant="light">{supplements.length}</Badge>
+            </Group>
 
-      <Card withBorder radius="lg" p="md">
-        <Group justify="space-between" wrap="wrap">
-          <Text fw={700}>All plan items</Text>
-          <Badge variant="light">{planItems.length} items</Badge>
-        </Group>
-
-        {planItems.length === 0 ? (
-          <Text c="dimmed" mt="sm">
-            No items yet.
-          </Text>
-        ) : (
-          <Table.ScrollContainer minWidth={900} mt="sm">
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Enabled</Table.Th>
-                  <Table.Th>Name</Table.Th>
-                  <Table.Th>Person</Table.Th>
-                  <Table.Th>Schedule</Table.Th>
-                  <Table.Th>Dose</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {planItems.map(i => {
-                  const who =
-                    i.personId === 'household'
-                      ? 'Household'
-                      : (state.people.find(p => p.id === i.personId)?.name ?? 'Unknown')
-                  return (
-                    <Table.Tr key={i.id}>
-                      <Table.Td>
-                        <Checkbox
-                          checked={i.enabled}
-                          onChange={e =>
-                            setPlanItems(prev => prev.map(x => (x.id === i.id ? { ...x, enabled: e.currentTarget.checked } : x)))
-                          }
-                        />
-                      </Table.Td>
-                      <Table.Td>
-                        <Text fw={650}>{i.name}</Text>
-                      </Table.Td>
-                      <Table.Td>{who}</Table.Td>
-                      <Table.Td>{scheduleLabel(i.schedule)}</Table.Td>
-                      <Table.Td>{i.dose ?? '—'}</Table.Td>
-                      <Table.Td style={{ width: 120 }}>
-                        <Button
-                          variant="default"
-                          color="red"
-                          size="xs"
-                          onClick={() => setPlanItems(prev => prev.filter(x => x.id !== i.id))}
-                        >
-                          Delete
-                        </Button>
-                      </Table.Td>
+            {supplements.length === 0 ? (
+              <Text c="dimmed" mt="sm">
+                No supplements yet.
+              </Text>
+            ) : (
+              <Table.ScrollContainer minWidth={980} mt="sm">
+                <Table striped highlightOnHover>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Name</Table.Th>
+                      <Table.Th>Category</Table.Th>
+                      <Table.Th>Dose</Table.Th>
+                      <Table.Th>Schedule</Table.Th>
+                      <Table.Th />
                     </Table.Tr>
-                  )
-                })}
-              </Table.Tbody>
-            </Table>
-          </Table.ScrollContainer>
-        )}
-      </Card>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {supplements.map(s => (
+                      <Table.Tr key={s.id}>
+                        <Table.Td>
+                          <Text fw={650}>{s.name}</Text>
+                          <Text c="dimmed" size="xs">
+                            id {s.id}
+                          </Text>
+                        </Table.Td>
+                        <Table.Td>{String(s.category ?? '—')}</Table.Td>
+                        <Table.Td>
+                          {typeof s.dose === 'number' ? `${s.dose} ${s.unit ?? ''}`.trim() : '—'}
+                        </Table.Td>
+                        <Table.Td>{s.schedule ?? '—'}</Table.Td>
+                        <Table.Td style={{ width: 140 }}>
+                          <Button variant="default" color="red" size="xs" onClick={() => remove(s.id)}>
+                            Delete
+                          </Button>
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+            )}
+          </Card>
+        </>
+      )}
     </Stack>
   )
 }

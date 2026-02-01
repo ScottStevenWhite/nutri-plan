@@ -1,16 +1,14 @@
-import { createTheme } from '@mantine/core'
+import { Badge, Button, Card, NavLink, createTheme, rem } from '@mantine/core'
 
 export const theme = createTheme({
-  // Keep your current “system” feel
   fontFamily:
     'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
   headings: {
     fontFamily:
       'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
-    fontWeight: '650',
+    fontWeight: '750',
   },
 
-  // Solid, nutrition-friendly brand color (emerald-ish), no gradients needed
   colors: {
     brand: [
       '#ecfdf5',
@@ -27,6 +25,44 @@ export const theme = createTheme({
   },
 
   primaryColor: 'brand',
-  primaryShade: 7,
-  defaultRadius: 'md',
+  primaryShade: 6,
+
+  defaultRadius: 'lg',
+
+  components: {
+    Card: Card.extend({
+      defaultProps: {
+        radius: 'lg',
+        withBorder: true,
+      },
+    }),
+
+    Button: Button.extend({
+      defaultProps: {
+        radius: 'md',
+      },
+    }),
+
+    Badge: Badge.extend({
+      defaultProps: {
+        radius: 'sm',
+      },
+    }),
+
+    NavLink: NavLink.extend({
+      styles: theme => ({
+        root: {
+          borderRadius: theme.radius.md,
+          padding: `${rem(10)} ${rem(10)}`,
+        },
+        label: {
+          fontWeight: 800,
+        },
+        description: {
+          fontSize: theme.fontSizes.xs,
+          color: theme.colors.gray[6],
+        },
+      }),
+    }),
+  },
 })

@@ -16,15 +16,15 @@ import { useAppState } from '../state/AppStateContext'
 import { dayTotals, weekTotals, pickMacroSnapshot } from '../state/calc'
 import { clamp, formatNumber } from '../state/utils'
 
-const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
+const SLOT_NAMES = ['Slot 1', 'Slot 2', 'Slot 3', 'Slot 4', 'Slot 5', 'Slot 6', 'Slot 7'] as const
 type Mode = 'day' | 'week'
 
 export default function DashboardPage() {
   const { state, dispatch } = useAppState()
   const person = state.people.find(p => p.id === state.selectedPersonId)
 
-  const [mode, setMode] = useState<Mode>('day')
-  const [dayIndex, setDayIndex] = useState(0)
+  const [mode, setMode] = useState<Mode>('week')
+  const [slotIndex, setSlotIndex] = useState(0)
 
   const recipesById = useMemo(() => {
     const m: Record<string, any> = {}
@@ -34,8 +34,8 @@ export default function DashboardPage() {
 
   const totals = useMemo(() => {
     if (mode === 'week') return weekTotals(state.plan, recipesById, state.foodCache)
-    return dayTotals(dayIndex, state.plan, recipesById, state.foodCache)
-  }, [mode, dayIndex, state.plan, recipesById, state.foodCache])
+    return dayTotals(slotIndex, state.plan, recipesById, state.foodCache)
+  }, [mode, slotIndex, state.plan, recipesById, state.foodCache])
 
   const macros = pickMacroSnapshot(totals)
 
@@ -57,15 +57,15 @@ export default function DashboardPage() {
   const overCount = computedRows.filter(r => r.actual > r.target).length
 
   const personOptions = state.people.map(p => ({ value: p.id, label: p.name }))
-  const dayOptions = DAY_NAMES.map((d, i) => ({ value: String(i), label: d }))
+  const slotOptions = SLOT_NAMES.map((d, i) => ({ value: String(i), label: d }))
 
   return (
     <Stack gap="md">
       <Group justify="space-between" align="flex-end" wrap="wrap">
         <div>
-          <Title order={2}>Dashboard</Title>
+          <Title order={2}>Review</Title>
           <Text c="dimmed" size="sm">
-            Validate your plan against targets (day or week).
+            Validate the bundle against targets (slot or bundle view).
           </Text>
         </div>
 
@@ -79,11 +79,11 @@ export default function DashboardPage() {
 
       {!person && (
         <Alert color="yellow" title="Pick a person to compare against">
-          Go to <strong>People & Targets</strong> and select (or create) a profile.
+          Go to <strong>Targets</strong> and select (or create) a profile.
         </Alert>
       )}
 
-      <Card withBorder radius="lg" p="md">
+      <Card p="md">
         <Group align="flex-end" wrap="wrap" justify="space-between">
           <Select
             label="Person"
@@ -99,18 +99,18 @@ export default function DashboardPage() {
             value={mode}
             onChange={v => setMode(v as Mode)}
             data={[
-              { label: 'Day', value: 'day' },
-              { label: 'Week', value: 'week' },
+              { label: 'Slot', value: 'day' },
+              { label: 'Bundle', value: 'week' },
             ]}
           />
 
           {mode === 'day' && (
             <Select
-              label="Day"
-              data={dayOptions}
-              value={String(dayIndex)}
-              onChange={v => setDayIndex(v ? Number(v) : 0)}
-              style={{ width: 140 }}
+              label="Slot"
+              data={slotOptions}
+              value={String(slotIndex)}
+              onChange={v => setSlotIndex(v ? Number(v) : 0)}
+              style={{ width: 160 }}
             />
           )}
         </Group>
@@ -125,12 +125,12 @@ export default function DashboardPage() {
 
         {person && (
           <Text c="dimmed" size="sm" mt="sm">
-            {missingCount} nutrients under target, {overCount} nutrients over target (in {mode} mode).
+            {missingCount} nutrients under target, {overCount} nutrients over target (in {mode === 'week' ? 'bundle' : 'slot'} mode).
           </Text>
         )}
       </Card>
 
-      <Card withBorder radius="lg" p="md">
+      <Card p="md">
         <Group justify="space-between" wrap="wrap">
           <Title order={4}>Targets vs actual</Title>
           <Badge variant="light">{computedRows.length} targets</Badge>
@@ -167,7 +167,7 @@ export default function DashboardPage() {
                       <Table.Td>
                         <Text fw={600}>{r.name}</Text>
                         <Text c="dimmed" size="xs">
-                          {r.unitName} · id {r.nutrientId}
+                          {r.unitName}
                         </Text>
                       </Table.Td>
                       <Table.Td>
@@ -194,54 +194,6 @@ export default function DashboardPage() {
               </Table.Tbody>
             </Table>
           </Table.ScrollContainer>
-        )}
-      </Card>
-
-      <Card withBorder radius="lg" p="md">
-        <Group justify="space-between" wrap="wrap">
-          <Title order={4}>All nutrients</Title>
-          <Badge variant="light">{Object.keys(totals).length} nutrients</Badge>
-        </Group>
-
-        {Object.keys(totals).length === 0 ? (
-          <Text c="dimmed" mt="sm">
-            No nutrients yet. Assign recipes in Week Plan and ensure foods are cached.
-          </Text>
-        ) : (
-          <Table.ScrollContainer minWidth={760} mt="sm">
-            <Table highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Nutrient</Table.Th>
-                  <Table.Th>Amount</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {Object.values(totals)
-                  .sort((a, b) => a.name.localeCompare(b.name))
-                  .slice(0, 250)
-                  .map(n => (
-                    <Table.Tr key={n.nutrientId}>
-                      <Table.Td>
-                        <Text fw={600}>{n.name}</Text>
-                        <Text c="dimmed" size="xs">
-                          {n.unitName} · id {n.nutrientId}
-                        </Text>
-                      </Table.Td>
-                      <Table.Td>
-                        {formatNumber(n.amount)} {n.unitName}
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-              </Table.Tbody>
-            </Table>
-          </Table.ScrollContainer>
-        )}
-
-        {Object.keys(totals).length > 250 && (
-          <Text c="dimmed" size="sm" mt="sm">
-            Showing first 250 nutrients. Use targets to focus on what you actually care about.
-          </Text>
         )}
       </Card>
     </Stack>

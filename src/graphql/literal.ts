@@ -1,3 +1,15 @@
+export type GqlRaw = { __gqlRaw: string }
+
+/** Embed a raw GraphQL literal (use sparingly). */
+export function gqlRaw(raw: string): GqlRaw {
+  return { __gqlRaw: raw }
+}
+
+/** Embed a GraphQL enum value (unquoted). */
+export function gqlEnum(value: string): GqlRaw {
+  return gqlRaw(value)
+}
+
 export function toGqlLiteral(value: unknown): string {
   if (value === null) return 'null'
   if (value === undefined) return 'null'
@@ -10,8 +22,10 @@ export function toGqlLiteral(value: unknown): string {
   }
 
   if (typeof value === 'object') {
-    const obj = value as Record<string, unknown>
-    const entries = Object.entries(obj)
+    const obj = value as any
+    if (obj && typeof obj.__gqlRaw === 'string') return String(obj.__gqlRaw)
+    const rec = obj as Record<string, unknown>
+    const entries = Object.entries(rec)
       .filter(([, v]) => v !== undefined) // omit undefined
       .map(([k, v]) => `${k}:${toGqlLiteral(v)}`)
     return `{${entries.join(',')}}`

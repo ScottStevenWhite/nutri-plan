@@ -12,7 +12,14 @@ body,
 
 body {
   margin: 0;
-  background: var(--mantine-color-gray-0);
+
+  /* Less bland: subtle “premium app” glow */
+  background:
+    radial-gradient(1200px 600px at 10% 0%, rgba(16, 185, 129, 0.10) 0%, transparent 60%),
+    radial-gradient(900px 500px at 90% 20%, rgba(99, 102, 241, 0.10) 0%, transparent 55%),
+    radial-gradient(900px 600px at 50% 100%, rgba(245, 158, 11, 0.08) 0%, transparent 55%),
+    var(--mantine-color-gray-0);
+
   color: var(--mantine-color-gray-9);
 }
 
@@ -24,7 +31,7 @@ a {
 code {
   background: var(--mantine-color-gray-1);
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
   font-size: 0.95em;

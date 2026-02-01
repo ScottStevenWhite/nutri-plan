@@ -1,36 +1,41 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Badge,
   Button,
   Card,
   Divider,
   Group,
+  Loader,
   Modal,
-  SegmentedControl,
-  SimpleGrid,
+  NumberInput,
+  Select,
   Stack,
   Table,
   Text,
   TextInput,
   Title,
 } from '@mantine/core'
-import { useDisclosure, useMediaQuery } from '@mantine/hooks'
+import { notifications } from '@mantine/notifications'
+import { useDisclosure } from '@mantine/hooks'
 
 import type { AppPage } from '../routes'
 import { useAppState } from '../state/AppStateContext'
-import { formatNumber } from '../state/utils'
-import { computeIngredientDemand } from '../derive/plan'
-import { findSourcingRule, upsertSourcingRule, useHousehold, vendorLabel } from '../local/household'
-import { useLocalStorageState } from '../local/useLocalStorageState';
+import type { GroceryLine, GroceryLineStatus, GroceryList, SourcingRule } from '../state/types'
+import { formatNumber, uid } from '../state/utils'
+import {
+  backendClearGroceryLineStatuses,
+  backendDeleteSourcingRule,
+  backendSetGroceryLineStatus,
+  backendUpsertSourcingRule,
+  fetchGroceryList,
+} from '../backend/api'
 
 type Props = {
   navigate: (page: AppPage) => void
 }
 
-type GroceryStatus = 'need' | 'have' | 'bought' | 'skip'
-type GroceryStatusMap = Record<string, GroceryStatus>
-
-function statusColor(s: GroceryStatus): string {
+function statusColor(s: GroceryLineStatus): string {
   switch (s) {
     case 'need':
       return 'yellow'
@@ -45,131 +50,193 @@ function statusColor(s: GroceryStatus): string {
   }
 }
 
-function nextStatus(s: GroceryStatus): GroceryStatus {
+function nextStatus(s: GroceryLineStatus): GroceryLineStatus {
   if (s === 'need') return 'have'
   if (s === 'have') return 'bought'
   if (s === 'bought') return 'skip'
   return 'need'
 }
 
-function defaultStatusFor(neededGrams: number): GroceryStatus {
-  return neededGrams > 0 ? 'need' : 'have'
+function lineMatchesQuery(line: GroceryLine, q: string): boolean {
+  if (!q) return true
+  const hay = [
+    line.name,
+    line.vendorName ?? '',
+    line.vendorProductName ?? '',
+    ...(line.usedBy ?? []),
+  ]
+    .join(' ')
+    .toLowerCase()
+  return hay.includes(q)
 }
 
 export default function GroceryListPage({ navigate }: Props) {
-  const { state } = useAppState()
-  const [household, setHousehold] = useHousehold()
+  const { state, backendStatus, refresh } = useAppState()
 
-  const recipesById = useMemo(() => {
-    const m: Record<string, any> = {}
-    for (const r of state.recipes) m[r.id] = r
-    return m
-  }, [state.recipes])
-
-  const ingredientDemand = useMemo(() => computeIngredientDemand(state.plan, recipesById), [state.plan, recipesById])
-
-  const [statusMap, setStatusMap] = useLocalStorageState<GroceryStatusMap>(
-    `nutri-plan::groceryStatus::${state.plan.id}`,
-    {},
-  )
+  const [list, setList] = useState<GroceryList | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string>('')
 
   const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<'all' | GroceryStatus>('all')
+  const [filterStatus, setFilterStatus] = useState<'all' | GroceryLineStatus>('all')
 
-  const isMobile = useMediaQuery('(max-width: 48em)')
-
-  // Sourcing wizard modal state
   const [opened, { open, close }] = useDisclosure(false)
-  const [activeFdcId, setActiveFdcId] = useState<number | null>(null)
-  const activeLine = activeFdcId != null ? ingredientDemand[String(activeFdcId)] : undefined
-  const activeRule = activeFdcId != null ? findSourcingRule(household, activeFdcId) : undefined
+  const [activeKey, setActiveKey] = useState<string | null>(null)
 
+  // Source mapping modal fields
   const [vendorId, setVendorId] = useState<string>('')
-  const [productName, setProductName] = useState('')
+  const [vendorProductId, setVendorProductId] = useState<string>('')
+  const [overrideGpp, setOverrideGpp] = useState<number | ''>('')
 
-  function openWizard(fdcId: number) {
-    const line = ingredientDemand[String(fdcId)]
-    if (!line) return
-    const rule = findSourcingRule(household, fdcId)
-    setActiveFdcId(fdcId)
-    setVendorId(rule?.vendorId ?? '')
-    setProductName(rule?.productName ?? '')
-    open()
+  const activeLine: GroceryLine | undefined = useMemo(() => {
+    if (!list || !activeKey) return undefined
+    for (const sec of list.vendors) {
+      const found = sec.lines.find(l => l.key === activeKey)
+      if (found) return found
+    }
+    return undefined
+  }, [list, activeKey])
+
+  async function load() {
+    setErr('')
+    setLoading(true)
+    try {
+      const gl = await fetchGroceryList()
+      setList(gl)
+    } catch (e: any) {
+      setErr(e?.message ?? String(e))
+    } finally {
+      setLoading(false)
+    }
   }
 
-  function saveWizard() {
-    if (activeFdcId == null) return
-    const line = ingredientDemand[String(activeFdcId)]
-    if (!line) return
-
-    const next = upsertSourcingRule(household, {
-      fdcId: activeFdcId,
-      ingredientName: line.description,
-      vendorId: (vendorId || undefined) as any,
-      productName: productName.trim() || undefined,
-    })
-
-    setHousehold(next)
-    close()
-  }
-
-  function pantryGramsFor(fdcId: number): number {
-    // v0: subtract only pantry items that specify fdcId AND use unit "g"
-    const matches = household.pantry.filter(p => p.fdcId === fdcId && (p.unit ?? '').toLowerCase() === 'g')
-    return matches.reduce((sum, p) => sum + (typeof p.quantity === 'number' ? p.quantity : 0), 0)
-  }
-
-  const lines = useMemo(() => {
-    const q = query.trim().toLowerCase()
-
-    const arr = Object.values(ingredientDemand).map(d => {
-      const pantry = pantryGramsFor(d.fdcId)
-      const used = Math.min(d.totalGrams, pantry)
-      const needed = Math.max(0, d.totalGrams - pantry)
-      const currentStatus = statusMap[String(d.fdcId)] ?? defaultStatusFor(needed)
-
-      const rule = findSourcingRule(household, d.fdcId)
-      const vendor = rule?.vendorId ? household.vendors.find(v => v.id === rule.vendorId) : undefined
-
-      return {
-        ...d,
-        pantryGrams: pantry,
-        pantryUsedGrams: used,
-        neededGrams: needed,
-        status: currentStatus,
-        sourcing: rule
-          ? `${vendorLabel(vendor)}${rule.productName ? ` · ${rule.productName}` : ''}`
-          : 'Unsourced',
-        hasSourcing: Boolean(rule?.vendorId || rule?.productName),
-      }
-    })
-
-    const filtered = arr
-      .filter(x => (q ? x.description.toLowerCase().includes(q) : true))
-      .filter(x => (filter === 'all' ? true : x.status === filter))
-
-    // Sort: need first, then have, then bought, then skip; within each, by needed grams desc
-    const rank: Record<GroceryStatus, number> = { need: 0, have: 1, bought: 2, skip: 3 }
-    filtered.sort((a, b) => {
-      const ra = rank[a.status]
-      const rb = rank[b.status]
-      if (ra !== rb) return ra - rb
-      return b.neededGrams - a.neededGrams
-    })
-
-    return filtered
-  }, [ingredientDemand, query, filter, statusMap, household])
+  useEffect(() => {
+    load()
+    // re-run when the plan id changes (new week)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.plan.id])
 
   const summary = useMemo(() => {
     const counts = { need: 0, have: 0, bought: 0, skip: 0 }
-    for (const d of Object.values(ingredientDemand)) {
-      const pantry = pantryGramsFor(d.fdcId)
-      const needed = Math.max(0, d.totalGrams - pantry)
-      const s = statusMap[String(d.fdcId)] ?? defaultStatusFor(needed)
-      counts[s]++
+    for (const sec of list?.vendors ?? []) {
+      for (const l of sec.lines ?? []) {
+        counts[l.status]++
+      }
     }
     return counts
-  }, [ingredientDemand, statusMap, household])
+  }, [list])
+
+  const filteredSections = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const secs = list?.vendors ?? []
+
+    return secs
+      .map(sec => {
+        const lines = (sec.lines ?? [])
+          .filter(l => (filterStatus === 'all' ? true : l.status === filterStatus))
+          .filter(l => lineMatchesQuery(l, q))
+        return { ...sec, lines }
+      })
+      .filter(sec => sec.lines.length > 0)
+  }, [list, query, filterStatus])
+
+  const vendorOptions = useMemo(
+    () => state.household.vendors.map(v => ({ value: v.id, label: `${v.name} (${v.type})` })),
+    [state.household.vendors],
+  )
+
+  const vendorProductsForVendor = useMemo(() => {
+    const all = state.household.vendorProducts ?? []
+    const filtered = vendorId ? all.filter(p => p.vendorId === vendorId) : all
+    return filtered
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(p => ({ value: p.id, label: p.name }))
+  }, [state.household.vendorProducts, vendorId])
+
+  function openSourceModal(line: GroceryLine) {
+    setActiveKey(line.key)
+
+    // prefill vendor/product if already sourced
+    const existingVp = line.vendorProductId
+      ? state.household.vendorProducts.find(p => p.id === line.vendorProductId)
+      : undefined
+
+    setVendorId(existingVp?.vendorId ?? line.vendorId ?? '')
+    setVendorProductId(line.vendorProductId ?? '')
+    setOverrideGpp(typeof line.gramsPerPackage === 'number' ? line.gramsPerPackage : '')
+    open()
+  }
+
+  async function saveSourceMapping() {
+    if (!activeLine) return
+    if (!activeLine.fdcId) {
+      notifications.show({ title: 'Cannot map source', message: 'This line has no fdcId.', color: 'red' })
+      return
+    }
+    if (!vendorProductId) {
+      notifications.show({ title: 'Pick a product', message: 'Select a vendor product.', color: 'yellow' })
+      return
+    }
+
+    const existingRule = state.household.sourcingRules.find(r => r.fdcId === activeLine.fdcId)
+    const ruleId = existingRule?.id ?? uid()
+
+    const gpp = typeof overrideGpp === 'number' && Number.isFinite(overrideGpp) && overrideGpp > 0 ? overrideGpp : undefined
+
+    const rule: SourcingRule = {
+      id: ruleId,
+      fdcId: activeLine.fdcId,
+      options: [{ vendorProductId, priority: 1, gramsPerPackage: gpp }],
+      notes: existingRule?.notes,
+    }
+
+    try {
+      await backendUpsertSourcingRule(rule)
+      await refresh()
+      await load()
+      close()
+      notifications.show({ title: 'Saved', message: 'Sourcing rule updated.', color: 'green' })
+    } catch (e: any) {
+      notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+    }
+  }
+
+  async function clearSourceMapping() {
+    if (!activeLine?.fdcId) return
+    const existingRule = state.household.sourcingRules.find(r => r.fdcId === activeLine.fdcId)
+    if (!existingRule) return
+
+    try {
+      await backendDeleteSourcingRule(existingRule.id)
+      await refresh()
+      await load()
+      close()
+      notifications.show({ title: 'Cleared', message: 'Sourcing rule removed.', color: 'green' })
+    } catch (e: any) {
+      notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+    }
+  }
+
+  async function setStatus(line: GroceryLine, status: GroceryLineStatus) {
+    // optimistic update
+    setList(prev => {
+      if (!prev) return prev
+      const vendors = prev.vendors.map(sec => ({
+        ...sec,
+        lines: sec.lines.map(l => (l.key === line.key ? { ...l, status } : l)),
+      }))
+      return { ...prev, vendors }
+    })
+
+    try {
+      await backendSetGroceryLineStatus(line.key, status)
+    } catch (e: any) {
+      notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+      // re-sync
+      await load()
+    }
+  }
 
   return (
     <Stack gap="md">
@@ -177,11 +244,11 @@ export default function GroceryListPage({ navigate }: Props) {
         <div>
           <Title order={2}>Grocery List</Title>
           <Text c="dimmed" size="sm">
-            v0 is derived locally. Later this becomes backend-generated + vendor-sourced.
+            Derived by backend from plan + recipes + household + pantry + sourcing rules + saved statuses.
           </Text>
         </div>
 
-        <Group gap="xs">
+        <Group gap="xs" wrap="wrap">
           <Badge variant="light" color={summary.need > 0 ? 'yellow' : 'green'}>
             {summary.need} need
           </Badge>
@@ -192,232 +259,248 @@ export default function GroceryListPage({ navigate }: Props) {
         </Group>
       </Group>
 
+      {backendStatus !== 'online' && (
+        <Alert color="yellow" title="Backend not online">
+          Grocery list requires the backend.
+        </Alert>
+      )}
+
       <Card withBorder radius="lg" p="md">
-        <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+        <Group justify="space-between" align="flex-end" wrap="wrap">
           <TextInput
             label="Search"
             value={query}
             onChange={e => setQuery(e.currentTarget.value)}
-            placeholder="e.g. oats, tofu, spinach…"
+            placeholder="ingredient, vendor, product, recipe…"
+            style={{ flex: 1, minWidth: 260 }}
           />
 
-          <div>
-            <Text size="sm" fw={600}>
-              Filter
-            </Text>
-            <SegmentedControl
-              mt={6}
-              value={filter}
-              onChange={v => setFilter(v as any)}
-              data={[
-                { label: 'All', value: 'all' },
-                { label: 'Need', value: 'need' },
-                { label: 'Have', value: 'have' },
-                { label: 'Bought', value: 'bought' },
-                { label: 'Skip', value: 'skip' },
-              ]}
-            />
-          </div>
+          <Select
+            label="Filter status"
+            value={filterStatus}
+            onChange={v => setFilterStatus((v as any) ?? 'all')}
+            data={[
+              { value: 'all', label: 'All' },
+              { value: 'need', label: 'Need' },
+              { value: 'have', label: 'Have' },
+              { value: 'bought', label: 'Bought' },
+              { value: 'skip', label: 'Skip' },
+            ]}
+            style={{ width: 200 }}
+          />
 
-          <Group align="flex-end" justify="flex-end">
+          <Group>
+            <Button variant="default" onClick={load} leftSection={loading ? <Loader size="xs" /> : undefined}>
+              Refresh
+            </Button>
             <Button
               variant="default"
               color="red"
-              onClick={() => setStatusMap({})}
+              onClick={async () => {
+                try {
+                  await backendClearGroceryLineStatuses()
+                  await load()
+                  notifications.show({ title: 'Cleared', message: 'All grocery statuses reset.', color: 'green' })
+                } catch (e: any) {
+                  notifications.show({ title: 'Failed', message: e?.message ?? String(e), color: 'red' })
+                }
+              }}
             >
-              Reset statuses
+              Clear statuses
             </Button>
           </Group>
-        </SimpleGrid>
+        </Group>
 
-        <Divider my="md" />
+        {list?.warnings?.length ? (
+          <>
+            <Divider my="md" />
+            <Alert color="yellow" title="Warnings">
+              <Stack gap={4}>
+                {list.warnings.map((w, i) => (
+                  <Text key={i} size="sm">
+                    • {w}
+                  </Text>
+                ))}
+              </Stack>
+            </Alert>
+          </>
+        ) : null}
 
-        <Text c="dimmed" size="sm">
-          Pantry subtraction only works when pantry items specify <code>fdcId</code> and unit <code>g</code>. That’s deliberate:
-          fuzzy matching is a trap.
-        </Text>
+        {err && (
+          <>
+            <Divider my="md" />
+            <Alert color="red" title="Failed to load">
+              {err}
+            </Alert>
+          </>
+        )}
       </Card>
 
-      {/* Sourcing Wizard */}
-      <Modal opened={opened} onClose={close} title="Choose source" centered>
+      <Modal opened={opened} onClose={close} title="Map source" centered>
         {!activeLine ? (
-          <Text c="dimmed">No item selected.</Text>
+          <Text c="dimmed">No line selected.</Text>
         ) : (
           <Stack gap="sm">
             <div>
-              <Text fw={700}>{activeLine.description}</Text>
+              <Text fw={700}>{activeLine.name}</Text>
               <Text c="dimmed" size="sm">
-                fdcId {activeLine.fdcId}
+                key {activeLine.key}
+                {activeLine.fdcId ? ` · fdcId ${activeLine.fdcId}` : ''}
               </Text>
             </div>
 
-            <TextInput
-              label="Vendor (id)"
-              placeholder="e.g. azure-standard"
-              value={vendorId}
-              onChange={e => setVendorId(e.currentTarget.value)}
+            <Select
+              label="Vendor"
+              value={vendorId || null}
+              onChange={v => {
+                setVendorId(v ?? '')
+                setVendorProductId('')
+              }}
+              data={vendorOptions}
+              searchable
+              clearable
+              nothingFoundMessage="No vendors"
+            />
+
+            <Select
+              label="Vendor product"
+              value={vendorProductId || null}
+              onChange={v => setVendorProductId(v ?? '')}
+              data={vendorProductsForVendor}
+              searchable
+              clearable
+              nothingFoundMessage="No products"
               description={
-                household.vendors.length
-                  ? `Known vendors: ${household.vendors.map(v => v.id).join(', ')}`
+                vendorProductsForVendor.length === 0
+                  ? 'Add vendor products in Household → Products.'
                   : undefined
               }
             />
 
-            <TextInput
-              label="Product name (freeform for v0)"
-              placeholder="e.g. Organic rolled oats 5lb"
-              value={productName}
-              onChange={e => setProductName(e.currentTarget.value)}
+            <NumberInput
+              label="Grams per package override (optional)"
+              value={overrideGpp}
+              onChange={setOverrideGpp}
+              min={0}
+              step={50}
+              placeholder="e.g. 2268 for 5 lb"
             />
 
-            {activeRule && (
-              <Text c="dimmed" size="sm">
-                Existing: {activeRule.vendorId ?? '—'} · {activeRule.productName ?? '—'}
-              </Text>
-            )}
+            <Group justify="space-between" mt="sm">
+              <Button variant="default" color="red" onClick={clearSourceMapping}>
+                Clear rule
+              </Button>
 
-            <Group justify="flex-end">
-              <Button variant="default" onClick={close}>
-                Cancel
-              </Button>
-              <Button onClick={saveWizard}>
-                Save
-              </Button>
+              <Group>
+                <Button variant="default" onClick={close}>
+                  Cancel
+                </Button>
+                <Button onClick={saveSourceMapping} disabled={!vendorProductId}>
+                  Save
+                </Button>
+              </Group>
             </Group>
           </Stack>
         )}
       </Modal>
 
-      {/* List */}
-      <Card withBorder radius="lg" p="md">
-        <Group justify="space-between" wrap="wrap">
-          <Text fw={700}>Items</Text>
-          <Badge variant="light">{lines.length} shown</Badge>
-        </Group>
+      {loading && !list ? (
+        <Card withBorder radius="lg" p="md">
+          <Group>
+            <Loader size="sm" />
+            <Text c="dimmed">Loading grocery list…</Text>
+          </Group>
+        </Card>
+      ) : !list ? (
+        <Card withBorder radius="lg" p="md">
+          <Text c="dimmed">No grocery list loaded.</Text>
+        </Card>
+      ) : (
+        <Stack gap="md">
+          {filteredSections.map(sec => (
+            <Card key={sec.vendorId ?? sec.vendorName} withBorder radius="lg" p="md">
+              <Group justify="space-between" wrap="wrap">
+                <Text fw={800}>{sec.vendorName}</Text>
+                <Badge variant="light">{sec.lines.length} lines</Badge>
+              </Group>
 
-        {lines.length === 0 ? (
-          <Text c="dimmed" mt="sm">
-            No items match.
-          </Text>
-        ) : isMobile ? (
-          <Stack gap="sm" mt="sm">
-            {lines.map(l => (
-              <Card key={l.fdcId} withBorder radius="lg" p="md">
-                <Group justify="space-between" align="flex-start" wrap="nowrap">
-                  <div style={{ minWidth: 0 }}>
-                    <Text fw={700} lineClamp={2}>
-                      {l.description}
-                    </Text>
-                    <Text c="dimmed" size="xs">
-                      fdcId {l.fdcId}
-                    </Text>
-                  </div>
+              <Table.ScrollContainer minWidth={980} mt="sm">
+                <Table striped highlightOnHover>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Status</Table.Th>
+                      <Table.Th>Item</Table.Th>
+                      <Table.Th>Need</Table.Th>
+                      <Table.Th>Packages</Table.Th>
+                      <Table.Th>Used by</Table.Th>
+                      <Table.Th>Source</Table.Th>
+                      <Table.Th />
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {sec.lines.map(line => (
+                      <Table.Tr key={line.key}>
+                        <Table.Td style={{ width: 140 }}>
+                          <Button
+                            size="xs"
+                            variant="light"
+                            color={statusColor(line.status)}
+                            onClick={() => setStatus(line, nextStatus(line.status))}
+                          >
+                            {line.status.toUpperCase()}
+                          </Button>
+                        </Table.Td>
 
-                  <Button
-                    size="xs"
-                    variant="light"
-                    color={statusColor(l.status)}
-                    onClick={() => {
-                      const next = nextStatus(l.status)
-                      setStatusMap(prev => ({ ...prev, [String(l.fdcId)]: next }))
-                    }}
-                  >
-                    {l.status.toUpperCase()}
-                  </Button>
-                </Group>
+                        <Table.Td>
+                          <Text fw={650}>{line.name}</Text>
+                          <Text c="dimmed" size="xs">
+                            {typeof line.needGrams === 'number' ? `${formatNumber(line.needGrams, 0)} g need` : '—'}
+                            {typeof line.haveGrams === 'number' ? ` · ${formatNumber(line.haveGrams, 0)} g have` : ''}
+                          </Text>
+                        </Table.Td>
 
-                <Group mt="sm" justify="space-between">
-                  <Text size="sm">
-                    Needed: <strong>{formatNumber(l.neededGrams, 0)} g</strong>
-                  </Text>
-                  <Text c="dimmed" size="sm">
-                    Pantry: {formatNumber(l.pantryUsedGrams, 0)} g
-                  </Text>
-                </Group>
+                        <Table.Td style={{ width: 120 }}>
+                          {typeof line.needGrams === 'number' ? `${formatNumber(line.needGrams, 0)} g` : '—'}
+                        </Table.Td>
 
-                <Divider my="sm" />
+                        <Table.Td style={{ width: 120 }}>
+                          {typeof line.packagesToBuy === 'number' ? formatNumber(line.packagesToBuy, 0) : '—'}
+                        </Table.Td>
 
-                <Group justify="space-between" wrap="wrap">
-                  <Badge variant="light" color={l.hasSourcing ? 'green' : 'yellow'}>
-                    {l.hasSourcing ? 'Sourced' : 'Unsourced'}
-                  </Badge>
+                        <Table.Td>
+                          <Text c="dimmed" size="sm" lineClamp={2}>
+                            {(line.usedBy ?? []).join(', ') || '—'}
+                          </Text>
+                        </Table.Td>
 
-                  <Button size="xs" variant="default" onClick={() => openWizard(l.fdcId)}>
-                    Choose source
-                  </Button>
-                </Group>
+                        <Table.Td>
+                          <Text size="sm" fw={600}>
+                            {line.vendorProductName ?? 'Unsourced'}
+                          </Text>
+                          <Text c="dimmed" size="xs">
+                            {line.vendorName ?? '—'}
+                          </Text>
+                        </Table.Td>
 
-                <Text c="dimmed" size="xs" mt="xs">
-                  {l.sourcing}
-                </Text>
-              </Card>
-            ))}
-          </Stack>
-        ) : (
-          <Table.ScrollContainer minWidth={900} mt="sm">
-            <Table striped highlightOnHover>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Status</Table.Th>
-                  <Table.Th>Ingredient</Table.Th>
-                  <Table.Th>Needed (g)</Table.Th>
-                  <Table.Th>Pantry used (g)</Table.Th>
-                  <Table.Th>Source</Table.Th>
-                  <Table.Th />
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {lines.map(l => (
-                  <Table.Tr key={l.fdcId}>
-                    <Table.Td style={{ width: 140 }}>
-                      <Button
-                        size="xs"
-                        variant="light"
-                        color={statusColor(l.status)}
-                        onClick={() => {
-                          const next = nextStatus(l.status)
-                          setStatusMap(prev => ({ ...prev, [String(l.fdcId)]: next }))
-                        }}
-                      >
-                        {l.status.toUpperCase()}
-                      </Button>
-                    </Table.Td>
-
-                    <Table.Td>
-                      <Text fw={650}>{l.description}</Text>
-                      <Text c="dimmed" size="xs">
-                        fdcId {l.fdcId} · used in {l.recipeIds.length} recipes
-                      </Text>
-                    </Table.Td>
-
-                    <Table.Td>{formatNumber(l.neededGrams, 0)}</Table.Td>
-                    <Table.Td>{formatNumber(l.pantryUsedGrams, 0)}</Table.Td>
-
-                    <Table.Td>
-                      <Badge variant="light" color={l.hasSourcing ? 'green' : 'yellow'}>
-                        {l.hasSourcing ? 'Sourced' : 'Unsourced'}
-                      </Badge>
-                      <Text c="dimmed" size="xs" mt={4}>
-                        {l.sourcing}
-                      </Text>
-                    </Table.Td>
-
-                    <Table.Td style={{ width: 160 }}>
-                      <Button variant="default" size="xs" onClick={() => openWizard(l.fdcId)}>
-                        Choose source
-                      </Button>
-                    </Table.Td>
-                  </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-          </Table.ScrollContainer>
-        )}
-      </Card>
-
-      <Text c="dimmed" size="xs">
-        Reality check: sourcing rules should not be freeform long-term. This wizard is a bridge until backend vendor product catalogs exist.
-      </Text>
+                        <Table.Td style={{ width: 170 }}>
+                          <Button
+                            size="xs"
+                            variant="default"
+                            onClick={() => openSourceModal(line)}
+                            disabled={!line.fdcId}
+                          >
+                            Map source…
+                          </Button>
+                        </Table.Td>
+                      </Table.Tr>
+                    ))}
+                  </Table.Tbody>
+                </Table>
+              </Table.ScrollContainer>
+            </Card>
+          ))}
+        </Stack>
+      )}
     </Stack>
   )
 }

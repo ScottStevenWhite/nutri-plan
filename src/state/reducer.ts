@@ -1,4 +1,4 @@
-import type { AppAction, AppState, DayPlan, WeekPlan } from './types'
+import type { AppState, AppAction, DayPlan, Household, KitchenEquipmentCatalog, PersonProfile, WeekPlan } from './types'
 import { todayISO, uid } from './utils'
 
 const VERSION = 2
@@ -13,9 +13,46 @@ function emptyWeek(): WeekPlan {
   }
 }
 
+function defaultHousehold(): Household {
+  const vendors = [
+    { id: 'azure-standard', name: 'Azure Standard', type: 'delivery' },
+    { id: 'carmel-farmers-market', name: "Carmel Farmer's Market", type: 'market' },
+    { id: 'kroger', name: 'Kroger', type: 'grocery' },
+    { id: 'fresh-market', name: 'The Fresh Market', type: 'grocery' },
+    { id: 'niemann-harvest', name: 'Niemann Harvest Market', type: 'grocery' },
+  ]
+
+  return {
+    equipment: defaultEquipment(),
+    vendors,
+    vendorProducts: [],
+    sourcingRules: [],
+    pantry: [],
+    shoppingPreferences: {
+      vendorPriority: vendors.map(v => v.id),
+      preferredPrepDay: 'Sunday',
+      maxStoreRunsPerWeek: 1,
+      notes: '',
+    },
+  }
+}
+
 export function defaultState(): AppState {
   const scottId = uid()
   const ashleyId = uid()
+
+  const basePerson = (id: string, name: string, sex?: 'male' | 'female'): PersonProfile => ({
+    id,
+    name,
+    sex,
+    allergies: [],
+    supplements: [],
+    weightLog: [],
+    pregnancy: { enabled: false },
+    nutrientTargets: {},
+    watchouts: [],
+    notes: '',
+  })
 
   return {
     version: VERSION,
@@ -23,29 +60,21 @@ export function defaultState(): AppState {
     selectedPersonId: scottId,
     people: [
       {
-        id: scottId,
-        name: 'Scott',
-        sex: 'male',
+        ...basePerson(scottId, 'Scott', 'male'),
         currentWeightLb: 180,
         targetWeightLb: 155,
-        pregnancy: { enabled: false },
-        nutrientTargets: {},
-        notes: 'Optional notes',
       },
       {
-        id: ashleyId,
-        name: 'Ashley',
-        sex: 'female',
+        ...basePerson(ashleyId, 'Ashley', 'female'),
         currentWeightLb: 134,
         targetWeightLb: 120,
-        pregnancy: { enabled: false },
-        nutrientTargets: {},
         notes: 'Pregnancy mode will matter later.',
       },
     ],
     recipes: [],
     plan: emptyWeek(),
     foodCache: {},
+    household: defaultHousehold(),
   }
 }
 
@@ -53,7 +82,7 @@ function coerceStateShape(state: any): any {
   if (!state || typeof state !== 'object') return state
   const out: any = { ...state }
 
-  // foodCache might arrive as an array from GraphQL (e.g., [FoodDetailsLite])
+  // foodCache might arrive as an array from GraphQL ([FoodDetailsLite])
   const fc = out.foodCache ?? out.cachedFoods
   if (Array.isArray(fc)) {
     const map: Record<string, any> = {}
@@ -66,10 +95,11 @@ function coerceStateShape(state: any): any {
     out.foodCache = {}
   }
 
-  // nutrientTargets might arrive as an array per person
+  // people: nutrientTargets might arrive as an array per person; ensure arrays exist
   if (Array.isArray(out.people)) {
     out.people = out.people.map((p: any) => {
       const pp: any = { ...p }
+
       const nt = pp.nutrientTargets
       if (Array.isArray(nt)) {
         const rec: Record<string, any> = {}
@@ -81,12 +111,19 @@ function coerceStateShape(state: any): any {
       } else if (!pp.nutrientTargets || typeof pp.nutrientTargets !== 'object') {
         pp.nutrientTargets = {}
       }
+
       if (!pp.pregnancy) pp.pregnancy = { enabled: false }
+
+      pp.allergies = Array.isArray(pp.allergies) ? pp.allergies.map((x: any) => String(x)) : []
+      pp.supplements = Array.isArray(pp.supplements) ? pp.supplements : []
+      pp.weightLog = Array.isArray(pp.weightLog) ? pp.weightLog : []
+      pp.watchouts = Array.isArray(pp.watchouts) ? pp.watchouts.map((x: any) => String(x)) : []
+
       return pp
     })
   }
 
-  // Ensure plan day snack list exists
+  // plan: ensure snackRecipeIds exists
   if (out.plan?.days && Array.isArray(out.plan.days)) {
     out.plan = {
       ...out.plan,
@@ -97,6 +134,67 @@ function coerceStateShape(state: any): any {
     }
   }
 
+  // household: ensure shape + defaults
+  const h = out.household
+  if (!h || typeof h !== 'object') {
+    out.household = defaultHousehold()
+  } else {
+    const vendors = Array.isArray(h.vendors) ? h.vendors : []
+    const equipment = h.equipment && typeof h.equipment === 'object' ? h.equipment : defaultEquipment()
+
+    out.household = {
+      equipment: {
+        schemaVersion: String(equipment.schemaVersion ?? '1'),
+        generatedAtLocalDate: String(equipment.generatedAtLocalDate ?? todayISO()),
+        defaults: {
+          unitSystem: String(equipment.defaults?.unitSystem ?? 'us'),
+          tempUnit: String(equipment.defaults?.tempUnit ?? 'F'),
+          kitchenLocation: equipment.defaults?.kitchenLocation ?? '',
+          care: equipment.defaults?.care
+            ? {
+              dishwasherSafe: String(equipment.defaults.care.dishwasherSafe ?? 'unknown'),
+              cleaningNeeds: Array.isArray(equipment.defaults.care.cleaningNeeds) ? equipment.defaults.care.cleaningNeeds : [],
+              cleaningNotes: equipment.defaults.care.cleaningNotes ?? '',
+            }
+            : { dishwasherSafe: 'unknown', cleaningNeeds: [], cleaningNotes: '' },
+        },
+        items: Array.isArray(equipment.items)
+          ? equipment.items.map((it: any) => ({
+            ...it,
+            categoryPath: Array.isArray(it.categoryPath) ? it.categoryPath : [],
+            capabilities: Array.isArray(it.capabilities) ? it.capabilities : [],
+            care: it.care
+              ? {
+                dishwasherSafe: String(it.care.dishwasherSafe ?? 'unknown'),
+                cleaningNeeds: Array.isArray(it.care.cleaningNeeds) ? it.care.cleaningNeeds : [],
+                cleaningNotes: it.care.cleaningNotes ?? '',
+              }
+              : undefined,
+          }))
+          : [],
+      },
+      vendors,
+      vendorProducts: Array.isArray(h.vendorProducts) ? h.vendorProducts.map((p: any) => ({ ...p, tags: Array.isArray(p?.tags) ? p.tags : [] })) : [],
+      sourcingRules: Array.isArray(h.sourcingRules) ? h.sourcingRules : [],
+      pantry: Array.isArray(h.pantry) ? h.pantry : [],
+      shoppingPreferences:
+        h.shoppingPreferences && typeof h.shoppingPreferences === 'object'
+          ? {
+            vendorPriority: Array.isArray(h.shoppingPreferences.vendorPriority) ? h.shoppingPreferences.vendorPriority : vendors.map((v: any) => v.id),
+            preferredPrepDay: h.shoppingPreferences.preferredPrepDay ?? 'Sunday',
+            maxStoreRunsPerWeek: typeof h.shoppingPreferences.maxStoreRunsPerWeek === 'number' ? h.shoppingPreferences.maxStoreRunsPerWeek : 1,
+            notes: h.shoppingPreferences.notes ?? '',
+          }
+          : {
+            vendorPriority: vendors.map((v: any) => v.id),
+            preferredPrepDay: 'Sunday',
+            maxStoreRunsPerWeek: 1,
+            notes: '',
+          },
+    }
+  }
+
+
   return out
 }
 
@@ -106,20 +204,28 @@ export function migrateState(state: AppState): AppState {
   if (!s?.version) return { ...defaultState(), ...s, version: VERSION }
   if (s.version === VERSION) return s
 
+  // Keep old migrations intact; coerceStateShape already fixes new fields.
   if (s.version === 1) {
-    const people = (s.people ?? []).map((p: any) => ({
-      ...p,
-      sex: p.sex ?? 'male',
-      pregnancy: p.pregnancy ?? { enabled: false },
-      notes: p.notes ?? '',
-      nutrientTargets: p.nutrientTargets ?? {},
-    }))
-
-    return { ...s, version: VERSION, people }
+    return { ...s, version: VERSION }
   }
 
   return { ...defaultState(), ...s, version: VERSION }
 }
+
+function defaultEquipment(): KitchenEquipmentCatalog {
+  return {
+    schemaVersion: '1',
+    generatedAtLocalDate: todayISO(),
+    defaults: {
+      unitSystem: 'us',
+      tempUnit: 'F',
+      kitchenLocation: '',
+      care: { dishwasherSafe: 'unknown', cleaningNeeds: [], cleaningNotes: '' },
+    },
+    items: [],
+  }
+}
+
 
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {

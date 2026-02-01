@@ -6,6 +6,7 @@ import {
   backendDeletePerson,
   backendDeleteRecipe,
   backendResetAll,
+  backendSelectPerson,
   backendSetPlan,
   backendSetApiKey,
   backendUpsertPerson,
@@ -62,8 +63,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     async (action: AppAction) => {
       switch (action.type) {
         case 'HYDRATE':
+          return
+
         case 'SELECT_PERSON':
-          return // local-only unless backend adds a mutation for it
+          await backendSelectPerson(action.personId)
+          return
 
         case 'SET_API_KEY':
           await backendSetApiKey(action.apiKey)
@@ -77,17 +81,32 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           await backendDeletePerson(action.personId)
           return
 
-        case 'UPSERT_RECIPE':
-          await backendUpsertRecipe(action.recipe)
+        case 'UPSERT_RECIPE': {
+          const r = action.recipe
+          const hasName = Boolean(r.name?.trim())
+          const hasAtLeastOneIngredient =
+            Array.isArray(r.ingredients) &&
+            r.ingredients.some(i => Number.isFinite(i?.grams) && (i?.grams ?? 0) > 0 && Number.isFinite(i?.fdcId))
+
+          // Backend enforces: non-empty name + >= 1 ingredient.
+          // Keep local drafts, but don't spam failing mutations.
+          if (!hasName || !hasAtLeastOneIngredient) return
+
+          const saved = await backendUpsertRecipe(action.recipe)
+          // overwrite optimistic recipe with server-normalized recipe
+          dispatchBase({ type: 'UPSERT_RECIPE', recipe: saved })
           return
+        }
 
         case 'DELETE_RECIPE':
           await backendDeleteRecipe(action.recipeId)
           return
 
-        case 'SET_PLAN':
-          await backendSetPlan(action.plan)
+        case 'SET_PLAN': {
+          const saved = await backendSetPlan(action.plan)
+          dispatchBase({ type: 'SET_PLAN', plan: saved })
           return
+        }
 
         case 'CACHE_FOOD':
           await backendCacheFood(action.food)
